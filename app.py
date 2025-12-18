@@ -146,21 +146,25 @@ def identify_seller_from_card(card, domain, brand_name):
     seller_candidates = []
     
     # Text Analysis (Priority 2)
-    # Keywords based on user rule set
     seller_triggers = [
         "sold by", "merchant", "importer", "vendor", "shop name", 
         "fulfilled by", "distributed by", "dispatcher", "by "
     ]
     
-    # Get all text text_nodes
     text_nodes = list(card.stripped_strings)
     
     for i, text in enumerate(text_nodes):
         text_lower = text.lower()
         
+        # 0. Direct Brand Match (DTC Check) - Priority 1 if matches searched brand
+        # If we see the brand name standing alone or as a prefix, it's likely the "Seller" in a DTC context
+        if brand_name and brand_name.lower() == text_lower:
+             # Very strong signal if it's exact match and not a sentence
+             return text
+        
         for trigger in seller_triggers:
             if trigger in text_lower:
-                # Case A: "Sold by: SellerName" in same node
+                # Case A: "Sold by: SellerName"
                 if len(text) > len(trigger) + 2:
                     candidate = text_lower.split(trigger)[-1].strip(": -").title()
                 # Case B: "Sold by" ...next node... "SellerName"
@@ -169,26 +173,15 @@ def identify_seller_from_card(card, domain, brand_name):
                 else:
                     continue
                     
-                # Validation / Exclusion Logic
-                if len(candidate) > 50: continue # Likely garbage
+                if len(candidate) > 50: continue 
                 if candidate.lower() in ["amazon", "flipkart", "ebay", "nykaa"] and "sold by" not in text_lower:
-                    continue # Ignore platform name unless explicit
+                    continue 
                 
-                # Check if it matches Brand (DTC)
-                if brand_name and brand_name.lower() in candidate.lower():
-                    return candidate # High confidence if it matches brand context
-                
-                seller_candidates.append(candidate)
-                
-    if seller_candidates:
-        return seller_candidates[0] # Return first found (highest in DOM/Priority)
+                return candidate # High confidence triggers get immediate return
 
     # Link Analysis (Priority 3)
-    # Look for links that are NOT the main product link
     links = card.find_all("a", href=True)
     main_link_href = None
-    
-    # Attempt to identify main link (usually first or largest) to exclude it
     if links: main_link_href = links[0]['href']
         
     for link in links:
@@ -196,29 +189,38 @@ def identify_seller_from_card(card, domain, brand_name):
         text = link.get_text(strip=True)
         if not text: continue
         
-        # Skip main product link
         if href == main_link_href: continue
         
-        # heuristics for seller links
-        if "store" in text.lower() or "seller" in href or "profile" in href or "shop" in href:
+        # Heuristics for seller links (Generic + Specific Platforms)
+        href_lower = href.lower()
+        
+        # eBay users/stores
+        if "ebay" in domain and ("/usr/" in href_lower or "/str/" in href_lower):
+             return text
+             
+        # Amazon stores
+        if "amazon" in domain and ("/ws/" in href_lower or "/stores/" in href_lower):
+             return text
+             
+        # Generic "Store" links
+        if "store" in text.lower() or "seller" in href_lower or "profile" in href_lower or "shop" in href_lower:
             clean_text = text.replace("Visit the", "").replace("Store", "").strip()
             return clean_text
             
+    # Final Fallback: If we assume DTC (Direct to Consumer) site structure
+    # The domain itself might be the seller if no other info found
+    # But for marketplaces (Amazon/eBay), we return N/A if we can't find a 3rd party
+    if brand_name and brand_name.lower() in domain:
+        return brand_name.title()
+
     return "N/A"
 
-def extract_from_generic_dom(soup, domain):
+def extract_from_generic_dom(soup, domain, brand_name):
     """
-    Universally attempts to find 'Product Cards' in any HTML page using heuristic clustering.
-    Assumption: Products appear in groups of similar HTML structures (Lists, Divs) which contain:
-    - An Image
-    - A Link
-    - A Price-like text pattern
+    Universal Extractor
     """
     products = []
     seen_urls = set()
-    
-    # ... (Clustering Logic omitted for brevity, assuming we use the Bottom-Up Loop primarily now or both) ...
-    # Integrating into the Bottom-Up Loop which is most robust for details
     
     # Currency symbols to look for
     symbols = ['₹', '$', '€', '£', 'Rs', 'USD', 'INR', 'MRP']
@@ -229,7 +231,7 @@ def extract_from_generic_dom(soup, domain):
             # Walk up to find a container with a link
             parent = node.parent
             card = None
-            for _ in range(5): # Max 5 levels up
+            for _ in range(5): 
                 if parent is None or parent.name in ['body', 'html']: break
                 if parent.find("a", href=True):
                     card = parent
@@ -248,7 +250,6 @@ def extract_from_generic_dom(soup, domain):
             
             if url in seen_urls: continue
             
-            # Name
             name = link_node.get_text(strip=True)
             if len(name) < 3:
                     h_tag = card.find(['h1','h2','h3','h4'])
@@ -257,11 +258,8 @@ def extract_from_generic_dom(soup, domain):
 
             price = node.strip()
             
-            # USE NEW SELLER LOGIC
-            # We assume we don't have the Brand Name passed here easily, 
-            # but we can try to guess it or just pass None for DTC check
-            # For now passing None, or we could pass it if we refactor function signature
-            seller = identify_seller_from_card(card, domain, None)
+            # Identify Seller with Domain+Brand context
+            seller = identify_seller_from_card(card, domain, brand_name)
             
             products.append(normalize_product_data({
                 "name": name,
@@ -311,7 +309,6 @@ def detect_brand_products(url, brand_name):
         domain = urlparse(url).netloc
         
         # 1. Strategy A: Structured Data (JSON-LD)
-        # This is the gold standard for generic extraction. Works on Shopify, WooCommerce, many big sites.
         try:
             data = extruct.extract(response.text, base_url=url, syntaxes=['json-ld'])
             json_ld_list = data.get('json-ld', [])
@@ -319,13 +316,12 @@ def detect_brand_products(url, brand_name):
         except Exception:
             pass
 
-        # 2. Strategy B: Generic DOM Clustering
-        # If JSON-LD didn't yield results (or even if it did, to supplement), try visual extraction
+        # 2. Strategy B: Generic DOM Clustering / Bottom Up (Combined)
         if not found_products:
-             found_products.extend(extract_from_generic_dom(soup, domain))
+             # Scan using generic methods, passing brand name for better context
+             found_products.extend(extract_from_generic_dom(soup, domain, brand_name))
 
         # 3. Strategy C: Text Fallback
-        # If absolutely no product structures are found, check if the brand is even mentioned on the page
         if not found_products:
              text = soup.get_text(separator=' ', strip=True).lower()
              if brand_name.lower() in text:
