@@ -225,6 +225,58 @@ def extract_from_generic_dom(soup, domain):
         except Exception:
             continue
             
+    # 3. Strategy 2: Bottom-Up Price Search
+    # If clustering missed items (common in React apps with nested divs), search for prices and walk up.
+    if len(products) < 5:
+        # Currency symbols to look for
+        symbols = ['₹', '$', '€', '£', 'Rs', 'USD', 'INR', 'MRP']
+        price_nodes = soup.find_all(string=lambda t: t and any(s in str(t) for s in symbols))
+        
+        for node in price_nodes:
+            try:
+                # Walk up to find a container with a link
+                parent = node.parent
+                card = None
+                for _ in range(5): # Max 5 levels up
+                    if parent is None or parent.name in ['body', 'html']: break
+                    if parent.find("a", href=True):
+                        card = parent
+                        break
+                    parent = parent.parent
+                
+                if not card: continue
+                
+                # Extract details
+                link_node = card.find("a", href=True)
+                if not link_node: continue
+                
+                href = link_node['href']
+                if href.startswith(("javascript:", "#")): continue
+                url = f"https://{domain}{href}" if href.startswith("/") else href
+                
+                if url in seen_urls: continue
+                
+                # Name (Try finding a title closely related to the link)
+                # Fallback to link text
+                name = link_node.get_text(strip=True)
+                if len(name) < 3:
+                     # Try finding any nearby H tag
+                     h_tag = card.find(['h1','h2','h3','h4'])
+                     if h_tag: name = h_tag.get_text(strip=True)
+                
+                if len(name) < 3: continue
+
+                price = node.strip()
+                
+                products.append(normalize_product_data({
+                    "name": name,
+                    "price": price,
+                    "url": url,
+                    "method": "Generic Bottom-Up"
+                }, domain))
+                seen_urls.add(url)
+            except: continue
+
     # Deduplicate by URL
     return products
 
