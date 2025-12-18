@@ -275,7 +275,8 @@ def detect_brand_products(url, brand_name):
             return {
                 "status": "Blocked" if response.status_code in [403, 503] else "Error",
                 "details": f"HTTP {response.status_code}",
-                "products": []
+                "products": [],
+                "scan_url": url
             }
             
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -323,7 +324,7 @@ def detect_brand_products(url, brand_name):
             details = f"Extracted {len(found_products)} products."
             
     except Exception as e:
-        return {"status": "Error", "details": str(e), "products": []}
+        return {"status": "Error", "details": str(e), "products": [], "scan_url": url}
 
     return {
         "status": status_summary,
