@@ -156,28 +156,40 @@ def identify_seller_from_card(card, domain, brand_name):
     for i, text in enumerate(text_nodes):
         text_lower = text.lower()
         
-        # 0. Direct Brand Match (DTC Check) - Priority 1 if matches searched brand
-        # If we see the brand name standing alone or as a prefix, it's likely the "Seller" in a DTC context
-        if brand_name and brand_name.lower() == text_lower:
-             # Very strong signal if it's exact match and not a sentence
-             return text
-        
+        # 0. Direct Brand Match (DTC/Brand Check)
+        # If the brand name appears in a short text node (likely a label), assume Brand is Seller
+        if brand_name and len(text) < 50:
+             # Check for "By [Brand]" or just "[Brand]"
+             if text_lower == brand_name.lower() or text_lower == f"by {brand_name.lower()}":
+                 return brand_name.title()
+             # If brand name is in the text but not exact match, check if it looks like a brand label
+             if brand_name.lower() in text_lower:
+                  # Avoid catching the Title as the Seller
+                  # Heuristic: If text is short and contains brand, it might be "Visit the Chanel Store" or "Brand: Chanel" being split
+                  if "brand" in text_lower:
+                       return brand_name.title()
+
         for trigger in seller_triggers:
             if trigger in text_lower:
                 # Case A: "Sold by: SellerName"
                 if len(text) > len(trigger) + 2:
                     candidate = text_lower.split(trigger)[-1].strip(": -").title()
-                # Case B: "Sold by" ...next node... "SellerName"
+                    # Cleanup: Remove potential trailing info like " and fulfilled by..."
+                    if " and " in candidate: candidate = candidate.split(" and ")[0]
+                # Case B: "Sold by" ...next node... "SellerName" (handled in next iteration effectively)
                 elif i + 1 < len(text_nodes):
                     candidate = text_nodes[i+1].strip()
                 else:
-                    continue
-                    
-                if len(candidate) > 50: continue 
-                if candidate.lower() in ["amazon", "flipkart", "ebay", "nykaa"] and "sold by" not in text_lower:
-                    continue 
+                    candidate = None
                 
-                return candidate # High confidence triggers get immediate return
+                if candidate:
+                    if len(candidate) > 50: continue 
+                    # Filter out platform names UNLESS they are explicitly the seller (e.g. "Sold by Amazon")
+                    # If text says "Sold by Amazon", we KEEP it.
+                    # The previous logic excluded them. User wants "Transacting Entity".
+                    # If valid name, return it.
+                    return candidate
+
 
     # Link Analysis (Priority 3)
     links = card.find_all("a", href=True)
@@ -210,8 +222,17 @@ def identify_seller_from_card(card, domain, brand_name):
     # Final Fallback: If we assume DTC (Direct to Consumer) site structure
     # The domain itself might be the seller if no other info found
     # But for marketplaces (Amazon/eBay), we return N/A if we can't find a 3rd party
+    # Final Fallback: If we assume DTC (Direct to Consumer) site structure
     if brand_name and brand_name.lower() in domain:
         return brand_name.title()
+
+    # User Request: Explicitly attribute to Brand if brand name appears in text
+    # This acts as a catch-all to prevent "N/A" when the brand is mentioned.
+    if brand_name:
+         # Check if brand name is in the full text of the card
+         full_text = " ".join(text_nodes).lower()
+         if brand_name.lower() in full_text:
+              return brand_name.title()
 
     return "N/A"
 
