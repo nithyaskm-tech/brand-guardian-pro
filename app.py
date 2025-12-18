@@ -128,59 +128,123 @@ def extract_from_json_ld(json_ld, domain):
     recursive_find_products(json_ld)
     return products
 
-def extract_from_dom_amazon(soup, domain):
-    """
-    Fallback: Scrapes Amazon-specific search result cards.
-    """
-    products = []
-    items = soup.find_all("div", attrs={"data-component-type": "s-search-result"})
-    
-    for item in items:
-        try:
-            # Title
-            title_node = item.find("h2")
-            name = title_node.get_text(strip=True) if title_node else "Unknown"
-            
-            # Link
-            link_node = item.find("a", class_="a-link-normal")
-            url = f"https://{domain}{link_node['href']}" if link_node and link_node.get('href', '').startswith('/') else "N/A"
-            
-            # Price
-            price_whole = item.find("span", class_="a-price-whole")
-            price_fraction = item.find("span", class_="a-price-fraction")
-            price = "N/A"
-            if price_whole:
-                price = price_whole.get_text(strip=True) + (price_fraction.get_text(strip=True) if price_fraction else "")
-            
-            # Seller / Store Retrieval (Best Effort)
-            # Amazon usually displays "by [Brand]" or "Visit the [Store]"
-            seller = "N/A"
-            
-            # Case 1: "by BrandName"
-            by_line = item.find("span", class_="a-size-base-plus") 
-            if not by_line:
-                # Look for the row with secondary color which often holds "by ..."
-                rows_secondary = item.find_all(class_="a-color-secondary")
-                for row in rows_secondary:
-                    txt = row.get_text(strip=True)
-                    if txt.lower().startswith("by ") or "store" in txt.lower():
-                        seller = txt
-                        break
-            else:
-                seller = by_line.get_text(strip=True)
+    return products
 
+def extract_from_dom_nykaa(soup, domain):
+    products = []
+    # Nykaa often uses css- classes. We search for common patterns.
+    # Pattern A: Product Card containers
+    # Try generic "product" text in class or id if specific classes fail
+    
+    # Current best guess for Nykaa product cards based on common react builds
+    cards = soup.find_all("div", class_=lambda x: x and "product-card" in x)
+    if not cards:
+        cards = soup.find_all("div", class_="css-d5z3ro") # Random hash fallback
+    
+    # Fallback: Look for any container with an 'a' tag that looks like a product link
+    if not cards:
+        links = soup.find_all("a", href=lambda x: x and "/p/" in x)
+        # deduplicate parents
+        cards = list(set([l.find_parent("div") for l in links if l.find_parent("div")]))
+        
+    for card in cards[:10]: # Limit to avoiding garbage
+        try:
+            name_tag = card.find("div", class_="css-xrzmfa") or card.find("div", class_="name") or card.find("a", class_="css-qlopj4")
+            if not name_tag: continue
+            
+            name = name_tag.get_text(strip=True)
+            link_tag = card.find("a", href=True)
+            url = link_tag['href'] if link_tag else ""
+            if url and not url.startswith("http"): url = f"https://{domain}{url}"
+            
+            price_tag = card.find("span", class_="css-111z9ua") or card.find("div", class_="price")
+            price = price_tag.get_text(strip=True) if price_tag else "N/A"
+            
             products.append(normalize_product_data({
                 "name": name,
                 "price": price,
-                "priceCurrency": "USD", # Assumption/Fallback
-                "availability": "In Stock", # Assumption if listed
-                "seller": seller, # Now populated
                 "url": url,
-                "method": "Amazon DOM"
+                "method": "Nykaa DOM"
             }, domain))
-        except Exception:
-            continue
+        except: continue
+    return products
+
+def extract_from_dom_flipkart(soup, domain):
+    products = []
+    # Flipkart Class Constants (Obfuscated but stable for months)
+    # Row Container: _1AtVbE
+    # Grid Container: _13oc-S
+    
+    cards = soup.find_all("div", class_="_1AtVbE")
+    
+    for card in cards:
+        try:
+            # Check for List View Title
+            title_node = card.find("div", class_="_4rR01T")
+            if not title_node:
+                # Check for Grid View Title
+                title_node = card.find("a", class_="s1Q9rs")
+                
+            if not title_node: continue
             
+            name = title_node.get_text(strip=True)
+            
+            # URL
+            # if grid view, title_node is 'a'. if list view, parent might be 'a' or separate
+            if title_node.name == 'a':
+                href = title_node['href']
+            else:
+                link = card.find("a", class_="_1fQZEK")
+                href = link['href'] if link else ""
+                
+            url = f"https://{domain}{href}" if href.startswith("/") else href
+            
+            # Price
+            price_node = card.find("div", class_="_30jeq3")
+            price = price_node.get_text(strip=True) if price_node else "N/A"
+            
+            products.append(normalize_product_data({
+                "name": name,
+                "price": price,
+                "url": url,
+                "method": "Flipkart DOM"
+            }, domain))
+        except: continue
+        
+    return products
+
+def extract_from_dom_ebay(soup, domain):
+    products = []
+    # eBay uses s-item
+    items = soup.find_all("li", class_="s-item")
+    if not items:
+         items = soup.find_all("div", class_="s-item__wrapper")
+         
+    for item in items:
+        try:
+            title_tag = item.find("div", class_="s-item__title") or item.find("h3", class_="s-item__title")
+            if not title_tag or "Shop on eBay" in title_tag.get_text(): continue # Skip headers
+            
+            name = title_tag.get_text(strip=True)
+            
+            link_tag = item.find("a", class_="s-item__link")
+            url = link_tag['href'] if link_tag else "N/A"
+            
+            price_tag = item.find("span", class_="s-item__price")
+            price = price_tag.get_text(strip=True) if price_tag else "N/A"
+            
+            # Seller
+            seller_tag = item.find("span", class_="s-item__seller-info-text")
+            seller = seller_tag.get_text(strip=True) if seller_tag else "N/A"
+            
+            products.append(normalize_product_data({
+                "name": name,
+                "price": price,
+                "seller": seller,
+                "url": url,
+                "method": "eBay DOM"
+            }, domain))
+        except: continue
     return products
 
 def detect_brand_products(url, brand_name):
@@ -226,11 +290,18 @@ def detect_brand_products(url, brand_name):
             # parsing error ignored
             pass
 
-        # 2. If Amazon/specific, try DOM fallback if JSON-LD was empty
-        if not found_products and "amazon" in domain:
-            found_products.extend(extract_from_dom_amazon(soup, domain))
-            
-        # 3. If still empty, check simple text presence for "Not Found" status vs "Text Match" (without product details)
+        # 2. Specific DOM Parsers Fallback
+        if not found_products:
+            if "amazon" in domain:
+                found_products.extend(extract_from_dom_amazon(soup, domain))
+            elif "nykaa" in domain:
+                 found_products.extend(extract_from_dom_nykaa(soup, domain))
+            elif "flipkart" in domain:
+                 found_products.extend(extract_from_dom_flipkart(soup, domain))
+            elif "ebay" in domain:
+                 found_products.extend(extract_from_dom_ebay(soup, domain))
+
+        # 3. Simple Text Fallback (Status Check Code)
         if not found_products:
              text = soup.get_text(separator=' ', strip=True).lower()
              if brand_name.lower() in text:
