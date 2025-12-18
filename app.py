@@ -277,6 +277,15 @@ def extract_from_generic_dom(soup, domain, brand_name):
                     if h_tag: name = h_tag.get_text(strip=True)
             if len(name) < 3: continue
 
+            # Quality Check: Name matches Brand
+            # This prevents capturing "Recommended" or "Ad" items inconsistent with search
+            if brand_name and brand_name.lower() not in name.lower():
+                 # Fuzzy fallback: If multi-word brand (e.g. "Hugo Boss"), check if at least one main part exists
+                 brand_parts = [b for b in brand_name.lower().split() if len(b) > 2]
+                 if brand_parts and not any(part in name.lower() for part in brand_parts):
+                      continue
+
+
             price = node.strip()
             
             # Identify Seller with Domain+Brand context
