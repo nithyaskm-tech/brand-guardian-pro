@@ -268,9 +268,47 @@ def extract_from_generic_dom(soup, domain):
 
                 price = node.strip()
                 
+                # Enhanced Seller Detection
+                # 1. Look for text starting with "by " or containing "store" inside the card
+                seller = "N/A"
+                
+                # Check all text nodes in the card
+                card_text_nodes = card.find_all(string=True)
+                for txt in card_text_nodes:
+                    t_clean = txt.strip()
+                    if not t_clean: continue
+                    
+                    t_lower = t_clean.lower()
+                    
+                    # Pattern 1: "by [SellerName]" (Common on Amazon)
+                    if t_lower.startswith("by ") and len(t_clean) < 40:
+                        seller = t_clean[3:].strip() # Remove "by "
+                        break
+                        
+                    # Pattern 2: "Sold by [SellerName]" (Common on Flipkart/Walmart)
+                    if "sold by" in t_lower and len(t_clean) < 50:
+                        seller = t_clean.split("sold by")[-1].strip().strip(':')
+                        break
+                        
+                    # Pattern 3: "Visit the [Name] Store" (Amazon)
+                    if "visit the" in t_lower and "store" in t_lower:
+                         seller = t_clean.replace("Visit the", "").replace("Store", "").strip()
+                         break
+                
+                # Fallback: If no explicit pattern, sometimes the seller is just a secondary link (brand name link)
+                if seller == "N/A":
+                    # Look for a secondary link that is NOT the main product link
+                    all_links = card.find_all("a")
+                    for l in all_links:
+                        if l.get('href') != href and len(l.get_text(strip=True)) > 2:
+                            # Potential seller/brand link
+                            seller = l.get_text(strip=True)
+                            break
+                
                 products.append(normalize_product_data({
                     "name": name,
                     "price": price,
+                    "seller": seller,
                     "url": url,
                     "method": "Generic Bottom-Up"
                 }, domain))
