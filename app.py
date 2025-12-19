@@ -591,24 +591,32 @@ def fetch_product_details(product_url, brand_name):
              seller = identify_seller_from_card(buybox, "", brand_name)
              if seller != "N/A": return seller
              
-        # Generic: Scan main content
-        main_content = soup.find("main") or soup.find("div", class_="main-content") or soup.body
-        if main_content:
-             # Limit text to first 5000 chars to avoid footer noise
-             # Actually, identify_seller_from_card scans everything. Let's make a mini version.
-             
-             text = main_content.get_text(separator=" ", strip=True)
-             
-             # Regex again (same as card logic)
-             regex_patterns = [
-                r"(?i)(?:sold by|seller|courtesy of|merchant)[\s:-]+([A-Za-z0-9\s&'\.]+)",
-                r"(?i)(?:brand)[\s:-]+([A-Za-z0-9\s&'\.]+)"
-             ]
-             for pattern in regex_patterns:
-                match = re.search(pattern, text[:5000]) # Scan top 5000 chars
-                if match:
-                    cand = match.group(1).strip()
-                    if 2 < len(cand) < 40: return cand.title()
+        # Generic: Scan Full Body Content
+        # We need to scan the *entire* text because the buy box might be anywhere in the DOM.
+        text = soup.body.get_text(separator=" ", strip=True)
+         
+        # Comprehensive Regex Patterns
+        # Captures: "Label [Separator] SellerName"
+        regex_patterns = [
+            r"(?i)(?:sold by|seller|courtesy of|merchant)[\s:-]+([A-Za-z0-9\s&'\.]+)",
+            r"(?i)(?:importer|distributed by|marketed by|manufacturer)[\s:-]+([A-Za-z0-9\s&'\.]+)",
+            r"(?i)(?:brand)[\s:-]+([A-Za-z0-9\s&'\.]+)"
+        ]
+        
+        candidates = []
+        for pattern in regex_patterns:
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                cand = match.group(1).strip()
+                # Validate length and ban keywords
+                if 2 < len(cand) < 50:
+                    if any(w in cand.lower() for w in ["amazon", "details", "more buying", "options", "policy", "india"]):
+                         continue
+                    candidates.append(cand.title())
+        
+        # Priority: Return first valid candidate (regex order defines priority)
+        if candidates:
+             return candidates[0]
 
         return "N/A"
     except:
