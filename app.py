@@ -792,7 +792,7 @@ def main():
             
             # Helper for parallel execution
             def scan_domain(domain):
-                status_text.caption(f"Starting scan for {domain}...")
+                # UI updates not allowed in thread
                 search_url = construct_search_url(domain, brand_name_input)
                 return {
                     "domain": domain, 
