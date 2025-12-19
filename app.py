@@ -70,7 +70,7 @@ def normalize_product_data(item, source_domain):
         "Detection Method": item.get("method", "Generic")
     }
 
-def extract_from_json_ld(json_ld, domain):
+def extract_from_json_ld(json_ld, domain, brand_name=None):
     """
     Extracts product list from Schema.org ItemList or Product definitions.
     """
@@ -81,7 +81,14 @@ def extract_from_json_ld(json_ld, domain):
         name = node.get("name")
         image = node.get("image")
         url = node.get("url")
-        
+
+        # Brand Filter
+        if name and brand_name:
+             if brand_name.lower() not in name.lower():
+                  brand_parts = [b for b in brand_name.lower().split() if len(b) > 2]
+                  if brand_parts and not any(part in name.lower() for part in brand_parts):
+                       return # Skip this product
+
         # Offers (Price/Availability)
         offers = node.get("offers", {})
         # Offers can be a list or dict
@@ -93,6 +100,10 @@ def extract_from_json_ld(json_ld, domain):
         availability = offers.get("availability", "").replace("http://schema.org/", "")
         
         seller = offers.get("seller", {}).get("name") if isinstance(offers.get("seller"), dict) else "N/A"
+        
+        # Fallback seller from brand name if explicit seller missing
+        if seller == "N/A" and brand_name and name and brand_name.lower() in name.lower():
+             seller = brand_name.title()
         
         if name:
              products.append(normalize_product_data({
@@ -245,7 +256,19 @@ def extract_from_generic_dom(soup, domain, brand_name):
     
     # Currency symbols to look for
     symbols = ['₹', '$', '€', '£', 'Rs', 'USD', 'INR', 'MRP']
-    price_nodes = soup.find_all(string=lambda t: t and any(s in str(t) for s in symbols))
+    
+    # Secure Text Node Finding: Ignore Scripts/Styles
+    all_text_nodes = soup.find_all(string=True)
+    price_nodes = []
+    
+    for t in all_text_nodes:
+         if t.parent.name in ['script', 'style', 'noscript', 'head', 'meta', 'link', 'title']: continue
+         if any(s in str(t) for s in symbols):
+              clean_t = t.strip()
+              # Heuristic: Price text shouldn't be too long or look like code
+              if len(clean_t) > 40: continue 
+              if any(bad in clean_t for bad in ['{', '}', ';', 'var ', 'function', '=']): continue
+              price_nodes.append(t)
     
     for node in price_nodes:
         try:
@@ -361,7 +384,7 @@ def detect_brand_products(url, brand_name):
         try:
             data = extruct.extract(response.text, base_url=url, syntaxes=['json-ld'])
             json_ld_list = data.get('json-ld', [])
-            found_products.extend(extract_from_json_ld(json_ld_list, domain))
+            found_products.extend(extract_from_json_ld(json_ld_list, domain, brand_name))
         except Exception:
             pass
 
