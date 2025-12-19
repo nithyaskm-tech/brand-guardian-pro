@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import time
 import json
 import io
+import re
 from urllib.parse import quote, urlparse
 
 # --- Configuration & Constants ---
@@ -365,14 +366,16 @@ def detect_brand_products(url, brand_name):
 
         # 0. Early Negative Signal Check
         # If the page explicitly says "No results", stop immediately to avoid scraping "Recommendations"
+        # Use regex to avoid false positives like "1,000 results for" matching "0 results for"
         negative_signals = [
-            "no results found", 
-            "did not match any products", 
-            "0 results for", 
-            "we couldn't find any results",
-            "nothing matches your search"
+            r"no results found", 
+            r"did not match any products", 
+            r"\b0 results for", 
+            r"we couldn't find any results",
+            r"nothing matches your search"
         ]
-        if any(ns in text_content for ns in negative_signals):
+        
+        if any(re.search(ns, text_content) for ns in negative_signals):
              return {
                 "status": "Not Found",
                 "details": "Page explicitly states no results found.",
@@ -440,14 +443,35 @@ def extract_from_amazon_containers(soup, domain, brand_name):
     
     for card in cards:
         try:
-            # Title extraction (usually in h2)
-            title_node = card.find("h2")
-            if not title_node: continue
+            # Title extraction:
+            # 1. Try finding link inside h2 (standard)
+            # 2. Try identifying 'a-text-normal' link (often used for titles)
+            title_node = None
+            link_node = None
             
-            link_node = title_node.find("a", href=True)
+            # Strategy 1: Link inside H2
+            h2_candidates = card.find_all("h2")
+            for h2 in h2_candidates:
+                possible_link = h2.find("a", href=True)
+                if possible_link:
+                    link_node = possible_link
+                    break
+            
+            # Strategy 2: Look for standard title class if H2 failed
+            if not link_node:
+                 link_node = card.find("a", class_=lambda x: x and "a-text-normal" in x, href=True)
+            
+            # Strategy 3: Look for link containing span with a-text-normal
+            if not link_node:
+                 span_text = card.find("span", class_=lambda x: x and "a-text-normal" in x)
+                 if span_text and span_text.parent.name == "a":
+                      link_node = span_text.parent
+
             if not link_node: continue
             
             name = link_node.get_text(strip=True)
+            if len(name) < 5: continue # Too short to be a title
+
             href = link_node['href']
             url = f"https://{domain}{href}" if href.startswith("/") else href
             
