@@ -322,7 +322,7 @@ def detect_brand_products(url, brand_name):
     try:
         response = requests.get(
             url, 
-            impersonate="chrome120", 
+            impersonate="chrome110", 
             headers=headers,
             timeout=20
         )
@@ -337,6 +337,24 @@ def detect_brand_products(url, brand_name):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         domain = urlparse(url).netloc
+        text_content = soup.get_text(separator=' ', strip=True).lower()
+
+        # 0. Early Negative Signal Check
+        # If the page explicitly says "No results", stop immediately to avoid scraping "Recommendations"
+        negative_signals = [
+            "no results found", 
+            "did not match any products", 
+            "0 results for", 
+            "we couldn't find any results",
+            "nothing matches your search"
+        ]
+        if any(ns in text_content for ns in negative_signals):
+             return {
+                "status": "Not Found",
+                "details": "Page explicitly states no results found.",
+                "products": [],
+                "scan_url": url
+            }
         
         # 1. Strategy A: Structured Data (JSON-LD)
         try:
@@ -351,21 +369,14 @@ def detect_brand_products(url, brand_name):
              # Scan using generic methods, passing brand name for better context
              found_products.extend(extract_from_generic_dom(soup, domain, brand_name))
 
-        # 3. Strategy C: Text Fallback
+        # 3. Strategy C: Text Fallback (Status determination only)
         if not found_products:
-             text = soup.get_text(separator=' ', strip=True).lower()
-             if brand_name.lower() in text:
-                negative_signals = ["no results found", "did not match any products","0 results for"]
-                is_negative = any(ns in text for ns in negative_signals)
-                if is_negative:
-                    status_summary = "Not Found"
-                    details = "Positive match negated by 'No results' text."
-                else:
+              if brand_name.lower() in text_content:
                     status_summary = "Text Match"
                     details = "Brand name found in text, but product cards could not be identified automatically."
-             else:
-                 status_summary = "Not Found"
-                 details = "Brand name not found in visible text."
+              else:
+                  status_summary = "Not Found"
+                  details = "Brand name not found in visible text."
         else:
             status_summary = "Found"
             details = f"Extracted {len(found_products)} products."
