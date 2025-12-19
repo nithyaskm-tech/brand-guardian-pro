@@ -416,7 +416,7 @@ def extract_from_generic_dom(soup, domain, brand_name):
 
     return products
 
-def detect_brand_products(url, brand_name):
+def detect_brand_products(url, brand_name, deep_scan=False):
     """
     Scans URL and returns a LIST of products found.
     Generic implementation for ANY website.
@@ -452,6 +452,8 @@ def detect_brand_products(url, brand_name):
         soup = BeautifulSoup(response.text, 'html.parser')
         domain = urlparse(url).netloc
         text_content = soup.get_text(separator=' ', strip=True).lower()
+
+
 
         # 0. Early Negative Signal Check
         # If the page explicitly says "No results", stop immediately to avoid scraping "Recommendations"
@@ -527,6 +529,22 @@ def detect_brand_products(url, brand_name):
             status_summary = "Found"
             details = f"Extracted {len(found_products)} products."
             
+            # --- Deep Scan Logic ---
+            if deep_scan and found_products:
+                 # Only check top 5 items to save time
+                 count = 0
+                 for i, p in enumerate(found_products):
+                      if count >= 3: break
+                      
+                      # Only check if Seller is missing or just Brand Name (which might be a placeholder)
+                      if p["Seller"] == "N/A" or p["Seller"] == brand_name.title():
+                           if "http" in p["Product URL"]:
+                                details += f" [Deep Scan: {p['name'][:10]}...]"
+                                new_seller = fetch_product_details(p["Product URL"], brand_name)
+                                if new_seller and new_seller != "N/A":
+                                     found_products[i]["Seller"] = new_seller
+                                     count += 1
+            
     except Exception as e:
         return {"status": "Error", "details": str(e), "products": [], "scan_url": url}
 
@@ -536,6 +554,54 @@ def detect_brand_products(url, brand_name):
         "products": found_products,
         "scan_url": url
     }
+
+def fetch_product_details(product_url, brand_name):
+    """
+    Visits the product page to find the seller.
+    """
+    try:
+        # Same headers/impersonation
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+            "Referer": "https://www.google.com/"
+        }
+        response = requests.get(product_url, impersonate="chrome110", headers=headers, timeout=10)
+        if response.status_code != 200: return "N/A"
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # We can reuse the identify_seller_from_card logic, but passing the whole body
+        # Since identify_seller_from_card relies on stripped_strings, it should work on body too
+        # However, for efficiency, let's target common boxes
+        
+        # Amazon buybox
+        buybox = soup.find(id="merchant-info")
+        if buybox:
+             seller = identify_seller_from_card(buybox, "", brand_name)
+             if seller != "N/A": return seller
+             
+        # Generic: Scan main content
+        main_content = soup.find("main") or soup.find("div", class_="main-content") or soup.body
+        if main_content:
+             # Limit text to first 5000 chars to avoid footer noise
+             # Actually, identify_seller_from_card scans everything. Let's make a mini version.
+             
+             text = main_content.get_text(separator=" ", strip=True)
+             
+             # Regex again (same as card logic)
+             regex_patterns = [
+                r"(?i)(?:sold by|seller|courtesy of|merchant)[\s:-]+([A-Za-z0-9\s&'\.]+)",
+                r"(?i)(?:brand)[\s:-]+([A-Za-z0-9\s&'\.]+)"
+             ]
+             for pattern in regex_patterns:
+                match = re.search(pattern, text[:5000]) # Scan top 5000 chars
+                if match:
+                    cand = match.group(1).strip()
+                    if 2 < len(cand) < 40: return cand.title()
+
+        return "N/A"
+    except:
+        return "N/A"
 
 def extract_from_amazon_containers(soup, domain, brand_name):
     """
@@ -686,6 +752,7 @@ def main():
     col_input, col_action = st.columns([3, 1])
     with col_input:
         brand_name_input = st.text_input("Brand to Monitor", placeholder="Enter brand name...", label_visibility="collapsed")
+        deep_scan_mode = st.checkbox("Enable Deep Scan (Slower, visits product pages)", value=False, help="Checking this will visit the top 3 product pages individually to find the 'Sold by' information, which is often hidden on the search results page.")
     with col_action:
         start_btn = st.button("🚀 Start Scan", type="primary", use_container_width=True)
 
@@ -713,7 +780,7 @@ def main():
                 status_text.caption(f"Scanning {domain}...")
                 
                 search_url = construct_search_url(domain, brand_name_input)
-                result = detect_brand_products(search_url, brand_name_input)
+                result = detect_brand_products(search_url, brand_name_input, deep_scan=deep_scan_mode)
                 
                 # Store Summary
                 st.session_state.scan_summary.append({
