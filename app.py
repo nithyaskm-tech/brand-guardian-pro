@@ -225,6 +225,26 @@ def identify_seller_from_card(card, domain, brand_name):
     3. Proximity to Price (implied by card structure).
     """
     seller_candidates = []
+    text_nodes = list(card.stripped_strings)
+    
+    # Regex Extraction (Priority 1 - Visual Scanning)
+    # "See through" the page text for common patterns
+    full_text = " ".join(text_nodes)
+    regex_patterns = [
+        r"(?i)(?:sold by|seller|courtesy of|merchant)[\s:-]+([A-Za-z0-9\s&'\.]+)",
+        r"(?i)(?:brand)[\s:-]+([A-Za-z0-9\s&'\.]+)"
+    ]
+    
+    for pattern in regex_patterns:
+        match = re.search(pattern, full_text)
+        if match:
+            candidate = match.group(1).strip()
+            # Validation: Seller name shouldn't be too long or garbage
+            if 2 < len(candidate) < 40:
+                 # Check against common blockers
+                 if any(w in candidate.lower() for w in ["amazon", "available", "more buying", "details"]):
+                      continue
+                 return candidate.title()
     
     # Text Analysis (Priority 2)
     seller_triggers = [
@@ -232,7 +252,7 @@ def identify_seller_from_card(card, domain, brand_name):
         "fulfilled by", "distributed by", "dispatcher", "by "
     ]
     
-    text_nodes = list(card.stripped_strings)
+    # text_nodes already defined above
     
     for i, text in enumerate(text_nodes):
         text_lower = text.lower()
