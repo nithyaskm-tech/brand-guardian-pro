@@ -275,7 +275,7 @@ def extract_from_generic_dom(soup, domain, brand_name):
             # Walk up to find a container with a link
             parent = node.parent
             card = None
-            for _ in range(5): 
+            for _ in range(9): 
                 if parent is None or parent.name in ['body', 'html']: break
                 if parent.find("a", href=True):
                     card = parent
@@ -395,9 +395,21 @@ def detect_brand_products(url, brand_name):
 
         # 3. Strategy C: Text Fallback (Status determination only)
         if not found_products:
-              if brand_name.lower() in text_content:
+              # For long search queries, exact match of the whole string usually fails.
+              # Check for token overlap instead.
+              tokens = [t for t in brand_name.lower().split() if len(t) > 2]
+              token_match = False
+              if tokens:
+                   # If significant number of tokens are present
+                   present_count = sum(1 for t in tokens if t in text_content)
+                   if present_count / len(tokens) >= 0.5: # 50% match
+                        token_match = True
+              elif brand_name.lower() in text_content:
+                   token_match = True
+
+              if token_match:
                     status_summary = "Text Match"
-                    details = "Brand name found in text, but product cards could not be identified automatically."
+                    details = "Brand name/tokens found in text, but product cards could not be identified automatically."
               else:
                   status_summary = "Not Found"
                   details = "Brand name not found in visible text."
