@@ -388,6 +388,9 @@ def detect_brand_products(url, brand_name):
         except Exception:
             pass
 
+        if not found_products:
+             found_products.extend(extract_from_amazon_containers(soup, domain, brand_name))
+
         # 2. Strategy B: Generic DOM Clustering / Bottom Up (Combined)
         if not found_products:
              # Scan using generic methods, passing brand name for better context
@@ -426,6 +429,58 @@ def detect_brand_products(url, brand_name):
         "products": found_products,
         "scan_url": url
     }
+
+def extract_from_amazon_containers(soup, domain, brand_name):
+    """
+    Dedicated strategy for Amazon search results using reliable data attributes.
+    """
+    products = []
+    # Search for standard result containers
+    cards = soup.find_all("div", attrs={"data-component-type": "s-search-result"})
+    
+    for card in cards:
+        try:
+            # Title extraction (usually in h2)
+            title_node = card.find("h2")
+            if not title_node: continue
+            
+            link_node = title_node.find("a", href=True)
+            if not link_node: continue
+            
+            name = link_node.get_text(strip=True)
+            href = link_node['href']
+            url = f"https://{domain}{href}" if href.startswith("/") else href
+            
+            # Quality Check: Name matches Brand (borrowed from generic)
+            if brand_name and brand_name.lower() not in name.lower():
+                 brand_parts = [b for b in brand_name.lower().split() if len(b) > 2]
+                 if brand_parts and not any(part in name.lower() for part in brand_parts):
+                      continue
+
+            # Price extraction (look for a-price)
+            price = "N/A"
+            price_node = card.find(class_="a-price")
+            if price_node:
+                offscreen = price_node.find(class_="a-offscreen")
+                if offscreen:
+                    price = offscreen.get_text(strip=True)
+                else:
+                    price = price_node.get_text(separator="", strip=True) 
+            
+            # Seller identification
+            seller = identify_seller_from_card(card, domain, brand_name)
+            
+            products.append(normalize_product_data({
+                "name": name,
+                "price": price,
+                "seller": seller,
+                "url": url,
+                "method": "Amazon Structure"
+            }, domain))
+        except:
+            continue
+            
+    return products
 
 # --- Main App ---
 
