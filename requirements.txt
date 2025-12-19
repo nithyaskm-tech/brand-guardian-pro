@@ -5,3 +5,4 @@ pandas
 beautifulsoup4
 w3lib
 openpyxl
+google-generativeai

@@ -8,6 +8,7 @@ import json
 import io
 import re
 from urllib.parse import quote, urlparse
+import google.generativeai as genai
 
 # --- Configuration & Constants ---
 DEFAULT_DOMAINS = [
@@ -22,6 +23,74 @@ ST_PAGE_CONFIG = {
     "page_icon": "🔍",
     "layout": "wide"
 }
+
+# --- AI Extraction Logic ---
+def extract_with_gemini(text_content, domain, brand_name):
+    """
+    Uses Google Gemini 1.5 Flash to intelligently extract product data from raw text.
+    """
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = f"""
+        You are a product extraction expert. Analyze the following text content from a search result page on {domain} for the brand "{brand_name}".
+        
+        Extract a list of products that match the brand "{brand_name}".
+        Ignore "Sponsored" or "Recommended" items if they are clearly for other brands.
+        
+        For each product, extract:
+        - name: The full product title.
+        - price: The price with currency symbol.
+        - seller: The name of the seller or store (e.g. "Sold by XYZ", "Visit the ABC Store"). If implied to be the brand itself, use "{brand_name}".
+        - url: The product URL (relative or absolute). If not found, use "".
+        
+        Return ONLY valid JSON in the following format:
+        [
+            {{
+                "name": "Product Name",
+                "price": "$100",
+                "seller": "Seller Name",
+                "url": "/link/to/product"
+            }}
+        ]
+        
+        If no products found, return [].
+        
+        search_result_page_content_start:
+        {text_content[:30000]} 
+        search_result_page_content_end
+        """
+        
+        response = model.generate_content(prompt)
+        text_resp = response.text.strip()
+        
+        # Clean markdown
+        if text_resp.startswith("```json"):
+            text_resp = text_resp.replace("```json", "").replace("```", "")
+            
+        data = json.loads(text_resp)
+        normalized = []
+        for item in data:
+            # Post-process URL
+            u = item.get('url', '')
+            if u and not u.startswith('http'):
+                if u.startswith('/'):
+                    u = f"https://{domain}{u}"
+                else:
+                    u = f"https://{domain}/{u}"
+            
+            normalized.append(normalize_product_data({
+                "name": item.get('name'),
+                "price": item.get('price'),
+                "seller": item.get('seller', 'N/A'),
+                "url": u or f"https://{domain}",
+                "method": "AI Vision (Text)"
+            }, domain))
+            
+        return normalized
+        
+    except Exception as e:
+        print(f"Gemini Extraction Error: {e}")
+        return []
 
 # --- Helper Functions ---
 
@@ -382,6 +451,21 @@ def detect_brand_products(url, brand_name):
                 "products": [],
                 "scan_url": url
             }
+            
+        # --- AI Simplification ---
+        # If API Key is present, use AI to parse text instead of complex DOM logic
+        if st.session_state.get("google_api_key"):
+             ai_products = extract_with_gemini(text_content, domain, brand_name)
+             if ai_products:
+                  return {
+                    "status": "Found (AI)",
+                    "details": f"AI Extracted {len(ai_products)} products.",
+                    "products": ai_products,
+                    "scan_url": url
+                }
+             # If AI fails, fall back to standard logic below
+             
+        # 1. Strategy A: Structured Data (JSON-LD)
         
         # 1. Strategy A: Structured Data (JSON-LD)
         try:
@@ -568,6 +652,12 @@ def main():
             st.rerun()
 
         st.markdown("---")
+        with st.expander("🤖 AI Settings (Optional)"):
+             google_key = st.text_input("Gemini API Key", type="password", key="google_api_key_input")
+             if google_key:
+                  st.session_state.google_api_key = google_key
+             st.caption("AI extraction simplifies parsing and handles complex sites better.")
+
         if st.button("🔄 Reset Defaults"):
             st.session_state.domains_list = DEFAULT_DOMAINS.copy()
             st.rerun()
