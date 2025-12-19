@@ -433,27 +433,39 @@ def detect_brand_products(url, brand_name, deep_scan=False):
         "Referer": "https://www.google.com/"
     }
 
-    try:
-        response = requests.get(
-            url, 
-            impersonate="chrome110", 
-            headers=headers,
-            timeout=20
-        )
-        
-        if response.status_code != 200:
-            return {
-                "status": "Blocked" if response.status_code in [403, 503] else "Error",
-                "details": f"HTTP {response.status_code}",
-                "products": [],
-                "scan_url": url
-            }
+    # Implement Retry/Rotation for robust connections
+    impersonate_profiles = ["chrome110", "safari15_3", "edge101"]
+    response = None
+    last_error = None
+
+    for profile in impersonate_profiles:
+        try:
+            response = requests.get(
+                url, 
+                impersonate=profile, 
+                headers=headers,
+                timeout=20
+            )
+            if response.status_code == 200:
+                break # Success
+        except Exception as e:
+            last_error = e
+            time.sleep(1) # Brief pause before retry
+            continue
+    
+    if not response or response.status_code != 200:
+        error_details = f"HTTP {response.status_code}" if response else str(last_error)
+        return {
+            "status": "Blocked/Error",
+            "details": f"Failed after retries: {error_details}",
+            "products": [],
+            "scan_url": url
+        }
             
+    try:
         soup = BeautifulSoup(response.text, 'html.parser')
         domain = urlparse(url).netloc
         text_content = soup.get_text(separator=' ', strip=True).lower()
-
-
 
         # 0. Early Negative Signal Check
         # If the page explicitly says "No results", stop immediately to avoid scraping "Recommendations"
@@ -487,8 +499,6 @@ def detect_brand_products(url, brand_name, deep_scan=False):
                 }
              # If AI fails, fall back to standard logic below
              
-        # 1. Strategy A: Structured Data (JSON-LD)
-        
         # 1. Strategy A: Structured Data (JSON-LD)
         try:
             data = extruct.extract(response.text, base_url=url, syntaxes=['json-ld'])
@@ -539,7 +549,7 @@ def detect_brand_products(url, brand_name, deep_scan=False):
                       # Only check if Seller is missing or just Brand Name (which might be a placeholder)
                       if p["Seller"] == "N/A" or p["Seller"] == brand_name.title():
                            if "http" in p["Product URL"]:
-                                details += f" [Deep Scan: {p['name'][:10]}...]"
+                                details += f" [Deep Scan: {p['Product Name'][:10]}...]"
                                 new_seller = fetch_product_details(p["Product URL"], brand_name)
                                 if new_seller and new_seller != "N/A":
                                      found_products[i]["Seller"] = new_seller
