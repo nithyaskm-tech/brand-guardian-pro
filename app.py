@@ -9,6 +9,7 @@ import io
 import re
 from urllib.parse import quote, urlparse
 import google.generativeai as genai
+import concurrent.futures
 
 # --- Configuration & Constants ---
 DEFAULT_DOMAINS = [
@@ -786,36 +787,52 @@ def main():
             status_text = st.empty()
             target_len = len(st.session_state.domains_list)
             
-            for i, domain in enumerate(st.session_state.domains_list):
-                status_text.caption(f"Scanning {domain}...")
-                
+            status_text = st.empty()
+            target_len = len(st.session_state.domains_list)
+            
+            # Helper for parallel execution
+            def scan_domain(domain):
+                status_text.caption(f"Starting scan for {domain}...")
                 search_url = construct_search_url(domain, brand_name_input)
-                result = detect_brand_products(search_url, brand_name_input, deep_scan=deep_scan_mode)
-                
-                # Store Summary
-                st.session_state.scan_summary.append({
-                    "Domain": domain,
-                    "Status": result["status"],
-                    "Details": result["details"],
-                    "URL": result["scan_url"],
-                    "ProductCount": len(result["products"])
-                })
-                
-                # Store Products
-                if result["products"]:
-                    st.session_state.all_products.extend(result["products"])
-                else:
-                    # If no specific products found, add a summary row so it appears in report
-                    st.session_state.all_products.append(normalize_product_data({
-                        "name": f"Scan Summary: {result['status']}",
-                        "price": "-",
-                        "seller": "-",
-                        "url": result["scan_url"],
-                        "method": "Summary Only"
-                    }, domain))
+                return {
+                    "domain": domain, 
+                    "result": detect_brand_products(search_url, brand_name_input, deep_scan=deep_scan_mode)
+                }
 
-                progress_bar.progress((i + 1) / target_len)
-                time.sleep(1) # Pacing
+            # Parallel Execution
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                completed_count = 0
+                futures = {executor.submit(scan_domain, d): d for d in st.session_state.domains_list}
+                
+                for future in concurrent.futures.as_completed(futures):
+                    data = future.result()
+                    domain = data["domain"]
+                    result = data["result"]
+                    
+                    completed_count += 1
+                    status_text.caption(f"Finished {domain} ({completed_count}/{target_len})")
+                    progress_bar.progress(completed_count / target_len)
+                    
+                    # Store Summary
+                    st.session_state.scan_summary.append({
+                        "Domain": domain,
+                        "Status": result["status"],
+                        "Details": result["details"],
+                        "URL": result["scan_url"],
+                        "ProductCount": len(result["products"])
+                    })
+                    
+                    # Store Products
+                    if result["products"]:
+                        st.session_state.all_products.extend(result["products"])
+                    else:
+                        st.session_state.all_products.append(normalize_product_data({
+                            "name": f"Scan Summary: {result['status']}",
+                            "price": "-",
+                            "seller": "-",
+                            "url": result["scan_url"],
+                            "method": "Summary Only"
+                        }, domain))
 
             progress_bar.empty()
             status_text.empty()
