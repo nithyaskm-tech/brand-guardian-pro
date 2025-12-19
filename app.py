@@ -784,6 +784,8 @@ def main():
     if start_btn:
         if not brand_name_input:
             st.warning("⚠️ Enter a brand name.")
+        elif "http" in brand_name_input or "/" in brand_name_input:
+             st.error("⚠️ It looks like you entered a URL. Please enter a **Brand Name** (e.g., 'Canon') to monitor.")
         elif not st.session_state.domains_list:
             st.error("⚠️ No domains configured.")
         else:
