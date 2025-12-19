@@ -665,10 +665,15 @@ def extract_from_amazon_containers(soup, domain, brand_name):
             url = f"https://{domain}{href}" if href.startswith("/") else href
             
             # Quality Check: Name matches Brand (borrowed from generic)
-            if brand_name and brand_name.lower() not in name.lower():
-                 brand_parts = [b for b in brand_name.lower().split() if len(b) > 2]
-                 if brand_parts and not any(part in name.lower() for part in brand_parts):
-                      continue
+            if brand_name:
+                 # Normalize brand name: remove hyphens/slugs to ensure tokens match
+                 brand_clean = brand_name.lower().replace("-", " ").replace("_", " ")
+                 name_clean = name.lower()
+                 
+                 if brand_clean not in name_clean:
+                      brand_parts = [b for b in brand_clean.split() if len(b) > 2]
+                      if brand_parts and not any(part in name_clean for part in brand_parts):
+                           continue
 
             # Price extraction (look for a-price)
             price = "N/A"
