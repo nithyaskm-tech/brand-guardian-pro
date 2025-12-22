@@ -10,6 +10,7 @@ import re
 from urllib.parse import quote, urlparse
 import google.generativeai as genai
 import concurrent.futures
+import os
 
 # --- Configuration & Constants ---
 DEFAULT_DOMAINS = [
@@ -18,6 +19,24 @@ DEFAULT_DOMAINS = [
     "flipkart.com",
     "ebay.com"
 ]
+
+CONFIG_FILE = "domain_config.json"
+
+def load_domains():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_domains(domains):
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(domains, f)
+    except:
+        pass
 
 ST_PAGE_CONFIG = {
     "page_title": "Brand Presence Monitor",
@@ -217,6 +236,30 @@ def extract_from_json_ld(json_ld, domain, brand_name=None):
     # Deduplicate by URL
     return products
 
+def identify_availability(card):
+    """
+    Identifies availability status from a product card or page.
+    """
+    text = card.get_text(separator=" ", strip=True).lower()
+    
+    # Positive signals
+    if re.search(r"\bin stock\b", text):
+        return "In Stock"
+    if re.search(r"\bonly \d+ left\b", text):
+        return "Low Stock"
+    if re.search(r"\bavailable\b", text):
+        return "Available"
+        
+    # Negative signals
+    if re.search(r"\bout of stock\b", text):
+        return "Out of Stock"
+    if re.search(r"\bcurrently unavailable\b", text):
+        return "Unavailable"
+    if re.search(r"\bsold out\b", text):
+        return "Sold Out"
+        
+    return "Unknown"
+
 def identify_seller_from_card(card, domain, brand_name):
     """
     Advanced Logic to identify the Transacting Entity (Seller).
@@ -232,8 +275,11 @@ def identify_seller_from_card(card, domain, brand_name):
     # "See through" the page text for common patterns
     full_text = " ".join(text_nodes)
     regex_patterns = [
-        r"(?i)(?:sold by|seller|courtesy of|merchant)[\s:-]+([A-Za-z0-9\s&'\.]+)",
-        r"(?i)(?:brand)[\s:-]+([A-Za-z0-9\s&'\.]+)"
+        # Priority 1: Stop before "and Fulfilled" or similar common separators
+        r"(?i)(?:sold by|seller|courtesy of|merchant|importer|marketed by)[\s:-]+([A-Za-z0-9\s&'\.\-\(\),_]+?)(?=\s+(?:and|is|ships|fulfilled|payment)|$)",
+        # Priority 2: Standard greedy match (fallback)
+        r"(?i)(?:sold by|seller|courtesy of|merchant|importer|marketed by)[\s:-]+([A-Za-z0-9\s&'\.\-\(\),_]+)",
+        r"(?i)(?:brand)[\s:-]+([A-Za-z0-9\s&'\.\-\(\),_]+)"
     ]
     
     for pattern in regex_patterns:
@@ -241,10 +287,44 @@ def identify_seller_from_card(card, domain, brand_name):
         if match:
             candidate = match.group(1).strip()
             # Validation: Seller name shouldn't be too long or garbage
-            if 2 < len(candidate) < 40:
-                 # Check against common blockers
-                 if any(w in candidate.lower() for w in ["amazon", "available", "more buying", "details"]):
+            if 2 < len(candidate) < 60:
+                 # Clean up common garbage at the end of strings
+                 candidate = re.sub(r"(?i)(\d+(\.\d+)?\s?(stars?|ratings?|reviews?))", "", candidate).strip()
+                 # Clean up colors in parentheses (e.g. "(Black)", "(Grey)")
+                 candidate = re.sub(r"(?i)\s*\((black|grey|gray|white|blue|red|green|silver|gold)\)", "", candidate).strip()
+                 
+                 candidate_lower = candidate.lower()
+                 
+                 # 0. WORD COUNT CHECK (Sellers are rarely > 6 words, Titles are long)
+                 if len(candidate.split()) > 6:
                       continue
+
+                 # 1. START-OF-STRING BLOCKERS (Garbage text phrases)
+                 if candidate_lower.startswith(("who offers", "that you chose", "items that", "customers who", "ozone")):
+                      # Blocking "Ozone" starting match IF it's long (likely a title), but allow if short (official seller)
+                      if "ozone" in candidate_lower and len(candidate.split()) > 3:
+                           continue
+                      if candidate_lower.startswith(("who offers", "that you chose", "items that", "customers who")):
+                           continue
+
+                 # 2. SUBSTRING BLOCKERS (Common non-seller keywords)
+                 # Note: "plan" matching "Plantex" and "protection" matching generally. "protection plan" is safer.
+                 block_list_substrings = [
+                     "amazon", "available", "more buying", "details", 
+                     "installation", "add to cart", "warranty",
+                     "protection plan", "service", "get it", "tomorrow",
+                     "free delivery", "days", "replacement", "dispatched",
+                     "customer service"
+                 ]
+                 
+                 if any(w in candidate_lower for w in block_list_substrings):
+                      continue
+                      
+                 # 3. EXACT WORD BLOCKERS (Strict blocking for short common words)
+                 block_list_exact = ["cart", "plan", "here", "brand", "unknown"]
+                 if candidate_lower in block_list_exact:
+                      continue
+
                  return candidate.title()
     
     # Text Analysis (Priority 2)
@@ -276,8 +356,6 @@ def identify_seller_from_card(card, domain, brand_name):
                 # Case A: "Sold by: SellerName"
                 if len(text) > len(trigger) + 2:
                     candidate = text_lower.split(trigger)[-1].strip(": -").title()
-                    # Cleanup: Remove potential trailing info like " and fulfilled by..."
-                    if " and " in candidate: candidate = candidate.split(" and ")[0]
                 # Case B: "Sold by" ...next node... "SellerName" (handled in next iteration effectively)
                 elif i + 1 < len(text_nodes):
                     candidate = text_nodes[i+1].strip()
@@ -285,7 +363,9 @@ def identify_seller_from_card(card, domain, brand_name):
                     candidate = None
                 
                 if candidate:
-                    if len(candidate) > 50: continue 
+                    # Clean garbage again
+                    candidate = re.sub(r"(?i)(\d+(\.\d+)?\s?(stars?|ratings?|reviews?))", "", candidate).strip()
+                    if len(candidate) > 60: continue 
                     # Filter out platform names UNLESS they are explicitly the seller (e.g. "Sold by Amazon")
                     # If text says "Sold by Amazon", we KEEP it.
                     # The previous logic excluded them. User wants "Transacting Entity".
@@ -404,11 +484,13 @@ def extract_from_generic_dom(soup, domain, brand_name):
             
             # Identify Seller with Domain+Brand context
             seller = identify_seller_from_card(card, domain, brand_name)
+            availability = identify_availability(card)
             
             products.append(normalize_product_data({
                 "name": name,
                 "price": price,
                 "seller": seller,
+                "availability": availability,
                 "url": url,
                 "method": "Generic Bottom-Up"
             }, domain))
@@ -540,21 +622,33 @@ def detect_brand_products(url, brand_name, deep_scan=False):
             status_summary = "Found"
             details = f"Extracted {len(found_products)} products."
             
-            # --- Deep Scan Logic ---
+            # --- Deep Scan Logic (Parallelized) ---
             if deep_scan and found_products:
-                 # Only check top 5 items to save time
-                 count = 0
-                 for i, p in enumerate(found_products):
-                      if count >= 3: break
-                      
-                      # Only check if Seller is missing or just Brand Name (which might be a placeholder)
+                 # Filter items that need scanning (N/A or Brand Name placeholders)
+                 # Limit to top 50 to allow thorough checking without waiting forever
+                 candidates_indices = []
+                 for i, p in enumerate(found_products[:50]):
                       if p["Seller"] == "N/A" or p["Seller"] == brand_name.title():
                            if "http" in p["Product URL"]:
-                                details += f" [Deep Scan: {p['Product Name'][:10]}...]"
-                                new_seller = fetch_product_details(p["Product URL"], brand_name)
-                                if new_seller and new_seller != "N/A":
-                                     found_products[i]["Seller"] = new_seller
-                                     count += 1
+                                candidates_indices.append(i)
+                 
+                 details += f" [Deep Scan: Processing {len(candidates_indices)} items...]"
+                 
+                 def process_item(index):
+                      try:
+                           p = found_products[index]
+                           new_seller = fetch_product_details(p["Product URL"], brand_name)
+                           return index, new_seller
+                      except:
+                           return index, "N/A"
+
+                 # Run in parallel to speed up
+                 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                      future_to_index = {executor.submit(process_item, i): i for i in candidates_indices}
+                      for future in concurrent.futures.as_completed(future_to_index):
+                           idx, seller_result = future.result()
+                           if seller_result and seller_result != "N/A":
+                                found_products[idx]["Seller"] = seller_result
             
     except Exception as e:
         return {"status": "Error", "details": str(e), "products": [], "scan_url": url}
@@ -585,38 +679,34 @@ def fetch_product_details(product_url, brand_name):
         # Since identify_seller_from_card relies on stripped_strings, it should work on body too
         # However, for efficiency, let's target common boxes
         
-        # Amazon buybox
+        domain = urlparse(product_url).netloc
+
+        # 1. Target Specific Boxes (Amazon)
+        # Check standard merchant info box
         buybox = soup.find(id="merchant-info")
         if buybox:
-             seller = identify_seller_from_card(buybox, "", brand_name)
+             seller = identify_seller_from_card(buybox, domain, brand_name)
              if seller != "N/A": return seller
-             
-        # Generic: Scan Full Body Content
-        # We need to scan the *entire* text because the buy box might be anywhere in the DOM.
-        text = soup.body.get_text(separator=" ", strip=True)
-         
-        # Comprehensive Regex Patterns
-        # Captures: "Label [Separator] SellerName"
-        regex_patterns = [
-            r"(?i)(?:sold by|seller|courtesy of|merchant)[\s:-]+([A-Za-z0-9\s&'\.]+)",
-            r"(?i)(?:importer|distributed by|marketed by|manufacturer)[\s:-]+([A-Za-z0-9\s&'\.]+)",
-            r"(?i)(?:brand)[\s:-]+([A-Za-z0-9\s&'\.]+)"
-        ]
+
+        # Check Tabular Buybox (common in some layouts)
+        tabular = soup.find(id="tabular-buybox")
+        if tabular:
+             seller = identify_seller_from_card(tabular, domain, brand_name)
+             if seller != "N/A": return seller
         
-        candidates = []
-        for pattern in regex_patterns:
-            matches = re.finditer(pattern, text)
-            for match in matches:
-                cand = match.group(1).strip()
-                # Validate length and ban keywords
-                if 2 < len(cand) < 50:
-                    if any(w in cand.lower() for w in ["amazon", "details", "more buying", "options", "policy", "india"]):
-                         continue
-                    candidates.append(cand.title())
-        
-        # Priority: Return first valid candidate (regex order defines priority)
-        if candidates:
-             return candidates[0]
+        # Check "fresh-merchant-info" or similar specific IDs
+        for bid in ["fresh-merchant-info", "n3_buybox", "buybox-see-all-buying-choices-announce"]:
+             box = soup.find(id=bid)
+             if box:
+                  seller = identify_seller_from_card(box, domain, brand_name)
+                  if seller != "N/A": return seller
+
+        # 2. Generic: Scan Full Body Content (Fallback)
+        # Using the ROBUST function instead of custom regex loop
+        # We pass the body tag to reuse the same iterator/validation logic
+        if soup.body:
+             seller = identify_seller_from_card(soup.body, domain, brand_name)
+             if seller != "N/A": return seller
 
         return "N/A"
     except:
@@ -687,11 +777,13 @@ def extract_from_amazon_containers(soup, domain, brand_name):
             
             # Seller identification
             seller = identify_seller_from_card(card, domain, brand_name)
+            availability = identify_availability(card)
             
             products.append(normalize_product_data({
                 "name": name,
                 "price": price,
                 "seller": seller,
+                "availability": availability,
                 "url": url,
                 "method": "Amazon Structure"
             }, domain))
@@ -740,13 +832,15 @@ def main():
     with st.sidebar:
         st.markdown("### 🛠️ Configuration Panel")
         if "domains_list" not in st.session_state:
-            st.session_state.domains_list = DEFAULT_DOMAINS.copy()
+            saved = load_domains()
+            st.session_state.domains_list = saved if saved else DEFAULT_DOMAINS.copy()
 
         with st.expander("➕ Add Target Domain"):
             new_domain = st.text_input("Domain URL", placeholder="e.g. target.com", label_visibility="collapsed")
             if st.button("Add to List", use_container_width=True):
                 if new_domain and new_domain not in st.session_state.domains_list:
                     st.session_state.domains_list.append(new_domain.strip())
+                    save_domains(st.session_state.domains_list)
                     st.rerun()
 
         st.markdown(f"**Active Targets ({len(st.session_state.domains_list)})**")
@@ -759,6 +853,7 @@ def main():
         if domains_to_remove:
             for d in domains_to_remove:
                 st.session_state.domains_list.remove(d)
+            save_domains(st.session_state.domains_list)
             st.rerun()
 
         st.markdown("---")
@@ -770,6 +865,7 @@ def main():
 
         if st.button("🔄 Reset Defaults"):
             st.session_state.domains_list = DEFAULT_DOMAINS.copy()
+            save_domains(st.session_state.domains_list)
             st.rerun()
 
     # Main Inputs
