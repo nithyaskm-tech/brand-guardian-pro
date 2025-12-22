@@ -295,6 +295,25 @@ def identify_seller_from_card(card, domain, brand_name):
                  
                  candidate_lower = candidate.lower()
                  
+                 # --- FIX for "Seller Name Seller Name Sold by..." and "Name Name" ---
+                 # 1. Internal Keyword Cleanup
+                 for kw in ["sold by", "ships from", "distributed by"]:
+                      if kw in candidate_lower:
+                           idx = candidate_lower.find(kw)
+                           if idx > 2: # Ignore if it's at the very start
+                                candidate = candidate[:idx].strip()
+                                candidate_lower = candidate.lower()
+                                
+                 # 2. Deduplication check (e.g. "Cocoblu Retail Cocoblu Retail")
+                 words = candidate.split()
+                 if len(words) >= 4 and len(words) % 2 == 0:
+                      mid = len(words) // 2
+                      first_half = " ".join(words[:mid])
+                      second_half = " ".join(words[mid:])
+                      if first_half.lower() == second_half.lower():
+                           candidate = first_half
+                           candidate_lower = candidate.lower() # update
+                 
                  # 0. WORD COUNT CHECK (Sellers are rarely > 6 words, Titles are long)
                  if len(candidate.split()) > 6:
                       continue
@@ -314,7 +333,7 @@ def identify_seller_from_card(card, domain, brand_name):
                      "installation", "add to cart", "warranty",
                      "protection plan", "service", "get it", "tomorrow",
                      "free delivery", "days", "replacement", "dispatched",
-                     "customer service"
+                     "customer service", "that you chose"
                  ]
                  
                  if any(w in candidate_lower for w in block_list_substrings):
