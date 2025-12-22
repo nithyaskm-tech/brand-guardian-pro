@@ -114,8 +114,6 @@ def extract_with_gemini(text_content, domain, brand_name):
 
 # --- Helper Functions ---
 
-# --- Helper Functions ---
-
 def construct_search_url(domain, brand_name):
     """
     Dynamically generates the search URL based on the domain.
@@ -229,12 +227,6 @@ def extract_from_json_ld(json_ld, domain, brand_name=None):
     recursive_find_products(json_ld)
     return products
 
-    return products
-
-    return products
-
-    # Deduplicate by URL
-    return products
 
 def identify_availability(card):
     """
@@ -333,7 +325,7 @@ def identify_seller_from_card(card, domain, brand_name):
                      "installation", "add to cart", "warranty",
                      "protection plan", "service", "get it", "tomorrow",
                      "free delivery", "days", "replacement", "dispatched",
-                     "customer service", "that you chose"
+                     "customer service", "that you chose", "often"
                  ]
                  
                  if any(w in candidate_lower for w in block_list_substrings):
@@ -465,8 +457,13 @@ def extract_from_generic_dom(soup, domain, brand_name):
             # Walk up to find a container with a link
             parent = node.parent
             card = None
-            for _ in range(9): 
-                if parent is None or parent.name in ['body', 'html']: break
+            for _ in range(7): # Reduced range to avoid grabbing too big containers
+                if parent is None or parent.name in ['body', 'html', 'header', 'footer', 'nav', 'aside']: break
+                # Check if this container looks like a header or extraneous section
+                cls = " ".join(parent.get("class", [])).lower()
+                if "header" in cls or "menu" in cls or "search-summary" in cls or "filter" in cls:
+                    break
+                    
                 if parent.find("a", href=True):
                     card = parent
                     break
@@ -474,9 +471,42 @@ def extract_from_generic_dom(soup, domain, brand_name):
             
             if not card: continue
             
-            # Extract details
-            link_node = card.find("a", href=True)
-            if not link_node: continue
+            # Validation: Product Name Validation
+            raw_title = link_node.get_text(separator=" ", strip=True)
+            
+            # --- Robust Title Cleaning ---
+            # 1. Check for Search Header patterns in Title
+            # e.g. "adidas (537K results)", "50 items found"
+            clean_title_lower = raw_title.lower()
+            if "results" in clean_title_lower or "items found" in clean_title_lower:
+                  continue
+                  
+            # Filter out generic link texts
+            if len(raw_title) < 4 or raw_title.lower() in ["view", "details", "shop now", "click here", "buy now"]:
+                 # Try to find a better title in the card (e.g. h2, h3 or img alt)
+                 title_tag = card.find(['h2', 'h3', 'h4'])
+                 if title_tag:
+                      candidate_title = title_tag.get_text(strip=True)
+                      # Validate candidate title too
+                      if "results" not in candidate_title.lower():
+                           raw_title = candidate_title
+                 else:
+                      img = card.find('img', alt=True)
+                      if img: raw_title = img['alt']
+
+            # Double check title after fallback
+            if "results" in raw_title.lower() or "items found" in raw_title.lower():
+                 continue
+
+            # 2. Container Safety Check
+            # If the 'card' text contains "Sort By", "Filter", "Refine", it's likely the whole page wrapper, NOT a product card.
+            card_text = card.get_text(separator=" ", strip=True).lower()
+            if any(x in card_text for x in ["sort by:", "filter by", "refine search", "relevant matches"]):
+                 # Use a stricter heuristic: The card text shouldn't be HUGE
+                 if len(card_text) > 2000: 
+                      continue
+            
+            href = link_node['href']
             
             href = link_node['href']
             if href.startswith(("javascript:", "#")): continue
@@ -528,15 +558,28 @@ def detect_brand_products(url, brand_name, deep_scan=False):
     details = ""
     
     # Generic "Real User" Headers
+    # Randomized standard user agents are handled by impersonate, but extra headers help
     headers = {
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-        "Referer": "https://www.google.com/"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.google.com/",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0"
     }
 
     # Implement Retry/Rotation for robust connections
-    impersonate_profiles = ["chrome110", "safari15_3", "edge101"]
+    # Use newer browser versions for better impersonation success
+    impersonate_profiles = ["chrome120", "chrome110", "safari15_3", "edge101"]
+    
+    # Special Handling for known tough sites (Depop, etc)
+    if "depop" in url:
+         headers["Referer"] = "https://www.depop.com/"
+         headers["Origin"] = "https://www.depop.com"
+
     response = None
     last_error = None
 
