@@ -429,6 +429,288 @@ def identify_seller_from_card(card, domain, brand_name):
 
     return "N/A"
 
+def extract_from_ebay_dom(soup, domain, brand_name):
+    products = []
+    # eBay list view or grid view
+    # Common container: ul.srp-results or ul.b-list__items_nofooter
+    items = []
+    ul = soup.select_one("ul.srp-results, ul.b-list__items_nofooter")
+    if ul:
+        items = ul.find_all("li", recursive=False)
+    
+    if not items:
+         # Fallback to search all s-item (generic)
+         items = soup.find_all(class_="s-item")
+    
+    for item in items:
+        try:
+            # Skip "Shop on eBay" pseudo items
+            classes = item.get("class", [])
+            if "s-item__pl-on-bottom" in classes: continue
+            
+            # Title
+            # Could be s-item__title, s-card__title, or just h3
+            title_tag = item.select_one(".s-item__title, .s-card__title, h3.s-item__title")
+            if not title_tag:
+                 # Try finding just text in the first link?
+                 link = item.select_one("a")
+                 if link and len(link.get_text(strip=True)) > 10:
+                      pass # Potential candidate, but let's stick to title classes first
+                 else:
+                      continue
+            else:
+                 pass
+            
+            if not title_tag: continue
+            name = title_tag.get_text(strip=True)
+            if "Shop on eBay" in name: continue
+            
+            # Price
+            price_tag = item.select_one(".s-item__price, .s-card__price")
+            price = price_tag.get_text(strip=True) if price_tag else "N/A"
+            
+            # Link
+            link_tag = item.select_one("a.s-item__link, a.s-card__link, a")
+            url = link_tag.get("href") if link_tag else ""
+            
+            # Seller
+            seller = "N/A"
+            seller_tag = item.select_one(".s-item__seller-info-text, .s-item__seller-info")
+            if seller_tag:
+                 seller = seller_tag.get_text(strip=True)
+            
+            # Robust Brand Check
+            if brand_name and brand_name.lower() not in name.lower():
+                 # Maybe allow if valid structure but missed name match?
+                 # For now, strict but allow if we found a valid price
+                 if price == "N/A": continue
+                 pass 
+            
+            products.append(normalize_product_data({
+                "name": name,
+                "price": price,
+                "seller": seller,
+                "url": url,
+                "method": "eBay DOM"
+            }, domain))
+        except: continue
+        
+    return products
+
+def extract_from_hidden_data(soup, domain, brand_name):
+    """
+    Extracts data from <script> tags:
+    1. Manual JSON-LD parsing (backup to extruct)
+    2. Redux/State variables (window.__PRELOADED_STATE__)
+    """
+    products = []
+    
+    # 1. Manual JSON-LD
+    scripts = soup.find_all('script', type='application/ld+json')
+    for script in scripts:
+        if not script.string: continue
+        try:
+            data = json.loads(script.string)
+            # JSON-LD can be a list or dict
+            if isinstance(data, list):
+                products.extend(extract_from_json_ld(data, domain, brand_name))
+            else:
+                products.extend(extract_from_json_ld([data], domain, brand_name))
+        except:
+            pass
+            
+    if products: return products
+
+    # 2. State Variables (Nykaa, Flipkart, etc.)
+    # Look for scripts containing specific keywords
+    state_scripts = soup.find_all('script')
+    for script in state_scripts:
+        if not script.string: continue
+        content = script.string
+        
+        # Nykaa / General Redux
+        if "window.__PRELOADED_STATE__" in content or "window.__INITIAL_STATE__" in content:
+            try:
+                # Extract JSON string: variable = { ... }
+                # Regex to grab the JSON object, using DOTALL for multi-line support
+                match = re.search(r"window\.__[A-Z_]+__\s*=\s*({.*});?", content, re.DOTALL)
+                if match:
+                    json_str = match.group(1)
+                    # Often ends with ; or similar, simple cleanup
+                    if json_str.endswith(";"): json_str = json_str[:-1]
+                    
+                    try:
+                        data = json.loads(json_str)
+                        print(f"DEBUG APP: Successfully loaded JSON for {domain}. Keys: {list(data.keys())[:5]}")
+                        
+                        # Direct Slot Extraction for Flipkart (bypass recursion limits)
+                        if 'pageDataV4' in data:
+                             print("DEBUG APP: Using Flipkart pageDataV4 specific extraction")
+                             pdata = data.get('pageDataV4', {}).get('page', {}).get('data', {})
+                             for slot_key, slot_val in pdata.items():
+                                  if isinstance(slot_val, list):
+                                       for widget in slot_val:
+                                            # Pattern 1: widget.widget.data.products (e.g. Recently Viewed)
+                                            ws = widget.get('widget', {}).get('data', {}).get('products', [])
+                                            
+                                            # Pattern 2: element.productInfo (Main Search Results)
+                                            # slot items might be just wrappers passed as 'widget'
+                                            if not ws and 'widget' in widget and 'data' in widget['widget']:
+                                                  # Sometimes results are in 'data' directly if it's a specific widget type?
+                                                  pass
+                                            
+                                            # Checking specific known structure from debug file:
+                                            # Slot lists contain dictionary items which have 'productInfo' inside 'element' or top level
+                                            
+                                            candidates = []
+                                            if isinstance(widget, dict):
+                                                 # Try direct productInfo
+                                                 if 'productInfo' in widget:
+                                                      candidates.append(widget)
+                                                 # Try nested in element
+                                                 elif 'element' in widget and 'productInfo' in widget['element']:
+                                                      candidates.append(widget['element'])
+                                                 
+                                            # Also check if slot_val itself is a list of product-like items?
+                                            # In debug file: "10003": [ { "productInfo": {...} }, ... ]
+                                            
+                                            for item in candidates:
+                                                p_info = item.get('productInfo', {}).get('value', {})
+                                                titles = p_info.get('titles', {})
+                                                pricing = p_info.get('pricing', {})
+                                                
+                                                name = titles.get('title')
+                                                price = None
+                                                if pricing:
+                                                     price = pricing.get('finalPrice', {}).get('value')
+                                                
+                                                # Fallback price from array
+                                                if not price and pricing and 'prices' in pricing:
+                                                     for p_opt in pricing['prices']:
+                                                          if not p_opt.get('strikeOff'):
+                                                               price = p_opt.get('value')
+                                                               break
+                                                
+                                                if name and price:
+                                                     # Brand check
+                                                     is_match = True
+                                                     if brand_name:
+                                                          b_lower = brand_name.lower()
+                                                          n_lower = name.lower()
+                                                          if b_lower not in n_lower:
+                                                               brand_parts = [b for b in b_lower.split() if len(b) > 2]
+                                                               if brand_parts:
+                                                                    if not any(part in n_lower for part in brand_parts):
+                                                                         is_match = False
+                                                               else:
+                                                                    is_match = False
+                                                     
+                                                     if is_match:
+                                                          # URL
+                                                          slug = p_info.get('baseUrl')
+                                                          url = f"https://{domain}{slug}" if slug else ""
+                                                          
+                                                          products.append(normalize_product_data({
+                                                              "name": name,
+                                                              "price": price,
+                                                              "seller": "N/A",
+                                                              "url": url,
+                                                              "method": "Flipkart Redux V4"
+                                                          }, domain))
+
+                    except Exception as e:
+                        print(f"DEBUG APP: Failed to load JSON from {domain}: {e}")
+                        continue
+                    
+                    # Search recursively for KEYWORDS-based extraction (Backup)
+                    # Heuristic: Objects with 'name', 'price', 'imageUrl' or 'sku'
+                    
+                    def find_products_in_state(node, depth=0):
+                        found = []
+                        if depth > 100: return found # Safety
+                        if isinstance(node, dict):
+                             # Check if this node is a product
+                             # Nykaa: 'name', 'finalPrice', 'slug'
+                             # Flipkart: 'titles': {'title': '...'}, 'pricing': {'finalPrice':...}
+                             
+                             name = node.get('name') or node.get('title')
+                             if not name and 'titles' in node and isinstance(node['titles'], dict):
+                                  name = node['titles'].get('title')
+                             
+                             price = node.get('price') or node.get('finalPrice') or node.get('offerPrice') or node.get('displayPrice') or node.get('listingPrice')
+                             # Flipkart deeper nesting for price
+                             if not price and 'pricing' in node and isinstance(node['pricing'], dict):
+                                  price = node['pricing'].get('finalPrice', {}).get('value') or node['pricing'].get('displayPrice', {}).get('value')
+                             
+                             # Formatting price
+                             if isinstance(price, int) or isinstance(price, float): price = str(price)
+                             if isinstance(price, dict): price = str(price) # Fallback if price is complex object
+                             
+                             slug = node.get('slug') or node.get('productUrl')
+                             
+                             if name and price:
+                                  # Validate Brand (Relaxed)
+                                  is_match = True
+                                  if brand_name:
+                                       b_lower = brand_name.lower()
+                                       n_lower = name.lower()
+                                       if b_lower not in n_lower:
+                                            # Fuzzy check: verify if meaningful parts of brand are present
+                                            brand_parts = [b for b in b_lower.split() if len(b) > 2]
+                                            if brand_parts:
+                                                 if not any(part in n_lower for part in brand_parts):
+                                                      is_match = False
+                                            else:
+                                                 is_match = False
+                                  
+                                  if is_match:
+                                      url = ""
+                                      if slug: 
+                                          url = f"https://{domain}/{slug}" if not slug.startswith("http") else slug
+                                      
+                                      found.append(normalize_product_data({
+                                          "name": name,
+                                          "price": price,
+                                          "seller": "N/A", # State usually has seller buried deeper, assume N/A for now
+                                          "url": url,
+                                          "method": "Hidden State (Redux)"
+                                      }, domain))
+                                        
+                             # Recurse
+                             for k, v in node.items():
+                                 found.extend(find_products_in_state(v, depth+1))
+                                 
+                        elif isinstance(node, list):
+                            for item in node:
+                                found.extend(find_products_in_state(item, depth+1))
+                        return found
+
+                    state_products = find_products_in_state(data)
+                    print(f"DEBUG APP: Found {len(state_products)} hidden products in {domain}")
+                    
+                    if not state_products:
+                         try:
+                             if brand_name and len(data) > 0:
+                                  with open(f"debug_failed_{domain}_hidden.json", "w", encoding="utf-8") as f:
+                                      json.dump(data, f, indent=2)
+                         except: pass
+
+                    products.extend(state_products)
+            except Exception as e:
+                print(f"DEBUG APP: Extraction Error: {e}")
+                pass
+
+    # Deduplicate
+    unique_products = []
+    seen = set()
+    for p in products:
+        k = p['Product Name'] + str(p['Price'])
+        if k not in seen:
+            seen.add(k)
+            unique_products.append(p)
+            
+    return unique_products
+
 def extract_from_generic_dom(soup, domain, brand_name):
     """
     Universal Extractor
@@ -474,28 +756,28 @@ def extract_from_generic_dom(soup, domain, brand_name):
             # Validation: Product Name Validation
             raw_title = link_node.get_text(separator=" ", strip=True)
             
-            # --- Robust Title Cleaning ---
-            # 1. Check for Search Header patterns in Title
-            # e.g. "adidas (537K results)", "50 items found"
-            clean_title_lower = raw_title.lower()
-            if "results" in clean_title_lower or "items found" in clean_title_lower:
-                  continue
-                  
-            # Filter out generic link texts
-            if len(raw_title) < 4 or raw_title.lower() in ["view", "details", "shop now", "click here", "buy now"]:
-                 # Try to find a better title in the card (e.g. h2, h3 or img alt)
-                 title_tag = card.find(['h2', 'h3', 'h4'])
-                 if title_tag:
-                      candidate_title = title_tag.get_text(strip=True)
-                      # Validate candidate title too
-                      if "results" not in candidate_title.lower():
-                           raw_title = candidate_title
+            # Depop/Image-heavy sites often have empty link text but valid Alt text or H-tags
+            # Check for better title immediately if the raw link text is weak
+            if len(raw_title) < 4:
+                 title_tag = card.find(['h2', 'h3', 'h4', 'span'])
+                 if title_tag and len(title_tag.get_text(strip=True)) > 5:
+                      raw_title = title_tag.get_text(strip=True)
                  else:
                       img = card.find('img', alt=True)
                       if img: raw_title = img['alt']
 
-            # Double check title after fallback
-            if "results" in raw_title.lower() or "items found" in raw_title.lower():
+            # --- Robust Title Cleaning ---
+            # 1. Check for Search Header patterns
+            clean_title_lower = raw_title.lower()
+            if re.search(r"(\d+k?|\d{1,3}(,\d{3})*) results", clean_title_lower) or "items found" in clean_title_lower:
+                  continue
+                  
+            # Filter out generic link texts
+            if len(raw_title) < 4 or clean_title_lower in ["view", "details", "shop now", "click here", "buy now"]:
+                 continue
+
+            # Double check title after fallback (Relaxed: Only block if it strictly looks like a stats line)
+            if re.search(r"^\d.*\sresults?$", raw_title.lower().strip()):
                  continue
 
             # 2. Container Safety Check
@@ -579,6 +861,10 @@ def detect_brand_products(url, brand_name, deep_scan=False):
     if "depop" in url:
          headers["Referer"] = "https://www.depop.com/"
          headers["Origin"] = "https://www.depop.com"
+    
+    # Custom Cookie Injection
+    if "custom_cookies" in st.session_state and st.session_state.custom_cookies:
+         headers["Cookie"] = st.session_state.custom_cookies.strip()
 
     response = None
     last_error = None
@@ -591,13 +877,29 @@ def detect_brand_products(url, brand_name, deep_scan=False):
                 headers=headers,
                 timeout=20
             )
+            # Check for soft blocks / challenges before accepting
             if response.status_code == 200:
-                break # Success
+                 r_text = response.text
+                 if "Pardon Our Interruption" in r_text or "Checking your browser" in r_text or "<title>Security Measure</title>" in r_text:
+                      last_error = "Soft Block (Challenge)"
+                      time.sleep(2)
+                      continue
+                 break # Success
         except Exception as e:
             last_error = e
             time.sleep(1) # Brief pause before retry
             continue
     
+    # Final check for block state to avoid downstream parsing errors
+    if response and response.status_code == 200:
+          if "Pardon Our Interruption" in response.text or "Checking your browser" in response.text:
+               return {
+                    "status": "Blocked",
+                    "details": "Access Denied by Anti-Bot (Challenge Page)",
+                    "products": [],
+                    "scan_url": url
+               }
+
     if not response or response.status_code != 200:
         error_details = f"HTTP {response.status_code}" if response else str(last_error)
         return {
@@ -655,6 +957,14 @@ def detect_brand_products(url, brand_name, deep_scan=False):
         if not found_products:
              found_products.extend(extract_from_amazon_containers(soup, domain, brand_name))
 
+        # 1.5 Strategy A2: Manual Script/State Extraction (For SPA sites like Nykaa/Flipkart)
+        if not found_products:
+             found_products.extend(extract_from_hidden_data(soup, domain, brand_name))
+        
+        # 1.6 Strategy A3: eBay Specific DOM
+        if "ebay" in domain:
+             found_products.extend(extract_from_ebay_dom(soup, domain, brand_name))
+
         # 2. Strategy B: Generic DOM Clustering / Bottom Up (Combined)
         if not found_products:
              # Scan using generic methods, passing brand name for better context
@@ -699,18 +1009,20 @@ def detect_brand_products(url, brand_name, deep_scan=False):
                  def process_item(index):
                       try:
                            p = found_products[index]
-                           new_seller = fetch_product_details(p["Product URL"], brand_name)
-                           return index, new_seller
+                           new_seller, new_avail = fetch_product_details(p["Product URL"], brand_name)
+                           return index, new_seller, new_avail
                       except:
-                           return index, "N/A"
+                           return index, "N/A", "Unknown"
 
                  # Run in parallel to speed up
                  with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                       future_to_index = {executor.submit(process_item, i): i for i in candidates_indices}
                       for future in concurrent.futures.as_completed(future_to_index):
-                           idx, seller_result = future.result()
+                           idx, seller_result, avail_result = future.result()
                            if seller_result and seller_result != "N/A":
                                 found_products[idx]["Seller"] = seller_result
+                           if avail_result and avail_result != "Unknown":
+                                found_products[idx]["Availability"] = avail_result
             
     except Exception as e:
         return {"status": "Error", "details": str(e), "products": [], "scan_url": url}
@@ -724,7 +1036,8 @@ def detect_brand_products(url, brand_name, deep_scan=False):
 
 def fetch_product_details(product_url, brand_name):
     """
-    Visits the product page to find the seller.
+    Visits the product page to find the seller and availability.
+    Returns: (seller, availability)
     """
     try:
         # Same headers/impersonation
@@ -733,46 +1046,50 @@ def fetch_product_details(product_url, brand_name):
             "Referer": "https://www.google.com/"
         }
         response = requests.get(product_url, impersonate="chrome110", headers=headers, timeout=10)
-        if response.status_code != 200: return "N/A"
+        if response.status_code != 200: return "N/A", "Unknown"
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # We can reuse the identify_seller_from_card logic, but passing the whole body
-        # Since identify_seller_from_card relies on stripped_strings, it should work on body too
-        # However, for efficiency, let's target common boxes
-        
         domain = urlparse(product_url).netloc
-
+        
+        seller = "N/A"
+        
         # 1. Target Specific Boxes (Amazon)
-        # Check standard merchant info box
         buybox = soup.find(id="merchant-info")
         if buybox:
-             seller = identify_seller_from_card(buybox, domain, brand_name)
-             if seller != "N/A": return seller
+             s = identify_seller_from_card(buybox, domain, brand_name)
+             if s != "N/A": seller = s
 
-        # Check Tabular Buybox (common in some layouts)
-        tabular = soup.find(id="tabular-buybox")
-        if tabular:
-             seller = identify_seller_from_card(tabular, domain, brand_name)
-             if seller != "N/A": return seller
-        
-        # Check "fresh-merchant-info" or similar specific IDs
-        for bid in ["fresh-merchant-info", "n3_buybox", "buybox-see-all-buying-choices-announce"]:
-             box = soup.find(id=bid)
-             if box:
-                  seller = identify_seller_from_card(box, domain, brand_name)
-                  if seller != "N/A": return seller
+        if seller == "N/A":
+             tabular = soup.find(id="tabular-buybox")
+             if tabular:
+                  s = identify_seller_from_card(tabular, domain, brand_name)
+                  if s != "N/A": seller = s
+             
+             # New "Accordion" style buyboxes
+             if seller == "N/A":
+                  for bid in ["buybox-accordion", "exports_desktop_qualifiedBuybox_buyNow_feature_div", "fresh-merchant-info", "n3_buybox"]:
+                       box = soup.find(id=bid)
+                       if box:
+                            s = identify_seller_from_card(box, domain, brand_name)
+                            if s != "N/A": 
+                                 seller = s
+                                 break
 
         # 2. Generic: Scan Full Body Content (Fallback)
-        # Using the ROBUST function instead of custom regex loop
-        # We pass the body tag to reuse the same iterator/validation logic
-        if soup.body:
-             seller = identify_seller_from_card(soup.body, domain, brand_name)
-             if seller != "N/A": return seller
+        if seller == "N/A" and soup.body:
+             s = identify_seller_from_card(soup.body, domain, brand_name)
+             if s != "N/A": seller = s
 
-        return "N/A"
+        # 3. Identify Availability
+        availability = "Unknown"
+        if soup.body:
+             availability = identify_availability(soup.body)
+
+        return seller, availability
     except:
-        return "N/A"
+        return "N/A", "Unknown"
+
+
 
 def extract_from_amazon_containers(soup, domain, brand_name):
     """
@@ -919,11 +1236,15 @@ def main():
             st.rerun()
 
         st.markdown("---")
-        with st.expander("🤖 AI Settings (Optional)"):
+        with st.expander("🔐 Advanced Settings (Anti-Bot Bypass)"):
+             st.caption("If blocked, paste your browser's 'Cookie' header here to Authenticate requests.")
+             cookie_input = st.text_area("Custom Cookies", placeholder="Paste Cookie string here...", key="cookie_input", height=100)
+             if cookie_input:
+                  st.session_state.custom_cookies = cookie_input
+             
              google_key = st.text_input("Gemini API Key", type="password", key="google_api_key_input")
              if google_key:
                   st.session_state.google_api_key = google_key
-             st.caption("AI extraction simplifies parsing and handles complex sites better.")
 
         if st.button("🔄 Reset Defaults"):
             st.session_state.domains_list = DEFAULT_DOMAINS.copy()
